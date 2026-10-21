@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEO-PLANNER AI // Dynamic Local Disk Agent</title>
+
+  <!-- Google Fonts: Space Grotesk & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Space+Grotesk:wght@600;700;900&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Space Grotesk', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brutalYellow: '#FFE600',
+            brutalPink: '#FF5C98',
+            brutalGreen: '#23F389',
+            brutalCyan: '#00E5FF',
+            brutalPurple: '#A066FF',
+            brutalOrange: '#FF7A00',
+            brutalCream: '#FAF7EE',
+            brutalDark: '#121212',
+          },
+          boxShadow: {
+            'brutal-sm': '2px 2px 0px #121212',
+            'brutal': '4px 4px 0px #121212',
+            'brutal-lg': '7px 7px 0px #121212',
+            'brutal-xl': '11px 11px 0px #121212',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Lucide Icons & Confetti -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+  <!-- Babel for In-Browser JSX Compilation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Import Maps for React and the Official Google GenAI SDK -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "@google/genai": "https://esm.sh/@google/genai@0.1.2"
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #FAF7EE;
+      color: #121212;
+    }
+    .tactile-btn {
+      transition: all 0.08s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .tactile-btn:hover {
+      transform: translate(-2px, -2px);
+    }
+    .tactile-btn:active {
+      transform: translate(3px, 3px);
+      box-shadow: 1px 1px 0px #121212 !important;
+    }
+    .custom-scroll::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    .custom-scroll::-webkit-scrollbar-track {
+      background: #FAF7EE;
+      border-left: 2px solid #121212;
+    }
+    .custom-scroll::-webkit-scrollbar-thumb {
+      background: #121212;
+      border: 1px solid #FAF7EE;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useRef } from 'react';
+    import ReactDOM from 'react-dom/client';
+    import { GoogleGenAI } from '@google/genai';
+
+    /* =========================================================================
+       LOCAL HARD DRIVE (ROM/DISK) DATABASE CONTROLLER
+       ========================================================================= */
+    const DB_FILE_NAME = "event_vault_db.json";
+    const IDB_STORE_NAME = "NeoDirectoryVault";
+
+    // IndexedDB helper to keep physical folder handle persistent across reloads
+    const initIDB = () => new Promise((resolve, reject) => {
+      const req = indexedDB.open("NeoPlannerLocalDB", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE_NAME);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    const persistDirHandle = async (handle) => {
+      const db = await initIDB();
+      const tx = db.transaction(IDB_STORE_NAME, "readwrite");
+      tx.objectStore(IDB_STORE_NAME).put(handle, "activeFolderHandle");
+    };
+
+    const getPersistedDirHandle = async () => {
+      const db = await initIDB();
+      return new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE_NAME, "readonly");
+        const req = tx.objectStore(IDB_STORE_NAME).get("activeFolderHandle");
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      });
+    };
+
+    /* =========================================================================
+       MAIN APPLICATION COMPONENT
+       ========================================================================= */
+    function NeoPlannerApp() {
+      // Local Machine Storage State
+      const [dirHandle, setDirHandle] = useState(null);
+      const [folderName, setFolderName] = useState("");
+      const [diskStatus, setDiskStatus] = useState("DISCONNECTED");
+      const [lastSavedTime, setLastSavedTime] = useState(null);
+
+      // AI Credentials & Dynamic State (NO Hardcoding)
+      const [apiKey, setApiKey] = useState(localStorage.getItem("GEMINI_KEY") || "");
+      const [isConfiguringKey, setIsConfiguringKey] = useState(!localStorage.getItem("GEMINI_KEY"));
+      
+      // Dynamic Event Data (Loaded from Disk or Generated by AI)
+      const [eventData, setEventData] = useState(null);
+      const [activeTab, setActiveTab] = useState("generator");
+      const [isGenerating, setIsGenerating] = useState(false);
+
+      // Copilot Agent Chat State
+      const [copilotInput, setCopilotInput] = useState("");
+      const [copilotMessages, setCopilotMessages] = useState([]);
+      const [isCopilotThinking, setIsCopilotThinking] = useState(false);
+
+      // AI Prompt State
+      const [eventType, setEventType] = useState("wedding");
+      const [userVision, setUserVision] = useState("");
+      const [targetBudget, setTargetBudget] = useState(12000);
+      const [guestCount, setGuestCount] = useState(75);
+
+      /* =====================================================================
+         FILE SYSTEM INITIALIZATION & DISK READ/WRITE
+         ===================================================================== */
+      useEffect(() => {
+        (async () => {
+          if ('showDirectoryPicker' in window) {
+            try {
+              const savedHandle = await getPersistedDirHandle();
+              if (savedHandle) {
+                const permission = await savedHandle.queryPermission({ mode: 'readwrite' });
+                if (permission === 'granted') {
+                  setDirHandle(savedHandle);
+                  setFolderName(savedHandle.name);
+                  await readDatabaseFromDisk(savedHandle);
+                }
+              }
+            } catch (err) {
+              console.warn("Storage auto-connect notice:", err);
+            }
+          }
+        })();
+      }, []);
+
+      // Trigger native Chromium Folder Picker
+      const connectLocalFolder = async () => {
+        try {
+          const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+          await persistDirHandle(handle);
+          setDirHandle(handle);
+          setFolderName(handle.name);
+          await readDatabaseFromDisk(handle);
+          triggerConfetti();
+        } catch (err) {
+          if (err.name !== 'AbortError') {
+            alert("Disk Permission Error: " + err.message);
+          }
+        }
+      };
+
+      // Read JSON file from the user's hard drive
+      const readDatabaseFromDisk = async (handle) => {
+        try {
+          setDiskStatus("READING ROM...");
+          const fileHandle = await handle.getFileHandle(DB_FILE_NAME, { create: true });
+          const file = await fileHandle.getFile();
+          const content = await file.text();
+          if (content.trim()) {
+            const parsed = JSON.parse(content);
+            setEventData(parsed);
+            setDiskStatus("CONNECTED & SYNCED");
+          } else {
+            setDiskStatus("EMPTY DISK VAULT");
+          }
+        } catch (err) {
+          console.error("Error reading disk database:", err);
+          setDiskStatus("READ ERROR");
+        }
+      };
+
+      // Write JSON file directly to the user's hard drive
+      const flushToDisk = async (updatedData) => {
+        if (!dirHandle) {
+          // Fallback to local storage if folder not chosen yet
+          localStorage.setItem("NEO_EVENT_FALLBACK", JSON.stringify(updatedData));
+          return;
+        }
+        try {
+          setDiskStatus("WRITING TO DISK...");
+          const fileHandle = await dirHandle.getFileHandle(DB_FILE_NAME, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(JSON.stringify(updatedData, null, 2));
+          await writable.close();
+          setDiskStatus("SAVED TO DISK");
+          setLastSavedTime(new Date().toLocaleTimeString());
+        } catch (err) {
+          console.error("Write error:", err);
+          setDiskStatus("WRITE ERROR");
+        }
+      };
+
+      const updateAndSyncEvent = (newData) => {
+        setEventData(newData);
+        flushToDisk(newData);
+      };
+
+      /* =====================================================================
+         GEMINI AI AGENTS: ARCHITECT & COPILOT
+         ===================================================================== */
+      const saveApiKey = (key) => {
+        setApiKey(key);
+        localStorage.setItem("GEMINI_KEY", key);
+        setIsConfiguringKey(false);
+      };
+
+      // AGENT 1: Dynamic Event Synthesis Agent
+      const runArchitectAgent = async () => {
+        if (!apiKey) {
+          setIsConfiguringKey(true);
+          return;
+        }
+        if (!userVision.trim()) {
+          alert("Please input your event vision or vibe!");
+          return;
+        }
+
+        setIsGenerating(true);
+        try {
+          const ai = new GoogleGenAI({ apiKey });
+          
+          const systemInstruction = `
+            You are the Master Event Architect AI Agent.
+            Synthesize an end-to-end event plan for a ${eventType} based strictly on:
+            Vision: "${userVision}", Target Budget: $${targetBudget}, Guests: ${guestCount}.
+            Do NOT return mock generic text. Calculate precise, realistic budget items, day-of timeline items, and specific vendor requirements.
+            You MUST return a JSON object adhering exactly to this structure:
+            {
+              "eventTitle": "Creative Title Here",
+              "tagline": "Bold aesthetic punchline",
+              "eventType": "${eventType}",
+              "totalBudgetCap": ${targetBudget},
+              "concepts": {
+                "themeSummary": "Detailed description of aesthetics, lighting, soundscape",
+                "colorPalette": ["Hex1", "Hex2", "Hex3", "Hex4"],
+                "signatureHacks": ["Quirky creative idea 1", "Quirky creative idea 2", "Quirky creative idea 3"]
+              },
+              "budgetItems": [
+                { "id": 1, "category": "Venue", "name": "Item description", "estimated": 3500, "actual": 0, "priority": "High" }
+              ],
+              "timeline": [
+                { "id": 1, "time": "15:00", "task": "Activity description", "owner": "Role/Person", "completed": false }
+              ],
+              "vendors": [
+                { "id": 1, "role": "Vendor Type", "name": "Bespoke Vendor Spec", "fee": 1500, "status": "To Contact", "vettingCriteria": "Key detail to check" }
+              ]
+            }
+          `;
+
+          const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: `Generate complete, detailed event architecture for: ${userVision}`,
+            config: {
+              systemInstruction: systemInstruction,
+              responseMimeType: "application/json",
+            }
+          });
+
+          const generatedPlan = JSON.parse(response.text);
+          updateAndSyncEvent(generatedPlan);
+          setActiveTab("overview");
+          triggerConfetti();
+        } catch (err) {
+          alert("Gemini Agent Error: " + err.message);
+        } finally {
+          setIsGenerating(false);
+        }
+      };
+
+      // AGENT 2: Interactive Dynamic Copilot Agent (Mutates Live State)
+      const runCopilotAgent = async () => {
+        if (!copilotInput.trim() || !eventData) return;
+        
+        const userCommand = copilotInput;
+        setCopilotInput("");
+        setCopilotMessages(prev => [...prev, { sender: "user", text: userCommand }]);
+        setIsCopilotThinking(true);
+
+        try {
+          const ai = new GoogleGenAI({ apiKey });
+          const prompt = `
+            You are the Event Planning Copilot Agent.
+            CURRENT EVENT STATE:
+            ${JSON.stringify(eventData)}
+
+            USER COMMAND:
+            "${userCommand}"
+
+            INSTRUCTIONS:
+            Analyze the user command. You can add budget items, adjust costs, add timeline tasks, update vendor notes, or refine the concept.
+            Return a JSON object with:
+            1. "agentMessage": A witty, sharp neo-brutalist confirmation message explaining your mutations.
+            2. "updatedEventData": The complete updated event JSON object with the user's modifications applied.
+          `;
+
+          const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json"
+            }
+          });
+
+          const result = JSON.parse(response.text);
+          setCopilotMessages(prev => [...prev, { sender: "ai", text: result.agentMessage }]);
+          updateAndSyncEvent(result.updatedEventData);
+          triggerConfetti();
+        } catch (err) {
+          setCopilotMessages(prev => [...prev, { sender: "ai", text: "Agent Error: " + err.message }]);
+        } finally {
+          setIsCopilotThinking(false);
+        }
+      };
+
+      const triggerConfetti = () => {
+        confetti({
+          particleCount: 45,
+          spread: 60,
+          origin: { y: 0.8 },
+          colors: ['#FFE600', '#FF5C98', '#00E5FF', '#23F389', '#121212']
+        });
+      };
+
+      /* =====================================================================
+         USER INTERFACE RENDERING
+         ===================================================================== */
+      return (
+        <div className="min-h-screen flex flex-col font-sans">
+          
+          {/* Brutalist Warning Ticker */}
+          <div className="bg-brutalDark text-brutalYellow font-mono text-xs font-black py-1.5 px-4 overflow-hidden border-b-4 border-brutalDark flex items-center justify-between">
+            <div className="flex gap-4 animate-pulse">
+              <span>⚡ GEMINI 2.5 FLASH DYNAMIC ENGINE</span>
+              <span>💾 ROM/HARD DISK DIRECT DATABASE</span>
+              <span>❌ NO HOSTED CLOUD LEAKS</span>
+              <span>🔥 TACTILE NEO-BRUTALISM</span>
+            </div>
+            <div className="hidden md:block">
+              {lastSavedTime ? `LAST DISK FLUSH: ${lastSavedTime}` : "PHYSICAL DISK READY"}
+            </div>
+          </div>
+
+          {/* Header */}
+          <header className="bg-brutalYellow border-b-4 border-brutalDark px-6 py-4">
+            <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h1 className="text-3xl md:text-4xl font-black tracking-tight uppercase flex items-center gap-2">
+                  <span>⚡ PLAN-BRUTAL</span>
+                  <span className="bg-brutalDark text-white text-xs px-2.5 py-1 font-mono">GENAI-ROM</span>
+                </h1>
+                <p className="font-bold text-xs md:text-sm mt-0.5">
+                  AI Planning Assistant that lives in your computer's local memory.
+                </p>
+              </div>
+
+              {/* Disk Connection Button & Key Config */}
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  onClick={connectLocalFolder}
+                  className="tactile-btn bg-brutalGreen px-4 py-2 font-black text-xs md:text-sm uppercase border-3 border-brutalDark shadow-brutal flex items-center gap-2"
+                >
+                  <span>📁</span>
+                  <span>{dirHandle ? `DRIVE: /${folderName}/` : "CONNECT LOCAL DRIVE"}</span>
+                </button>
+
+                <button
+                  onClick={() => setIsConfiguringKey(true)}
+                  className="tactile-btn bg-brutalCyan px-3 py-2 font-black text-xs md:text-sm uppercase border-3 border-brutalDark shadow-brutal flex items-center gap-1.5"
+                >
+                  <span>🔑</span>
+                  <span>{apiKey ? "API KEY CONFIGURED" : "SET GEMINI KEY"}</span>
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* API Key Modal */}
+          {isConfiguringKey && (
+            <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white border-4 border-brutalDark shadow-brutal-xl p-6 md:p-8 max-w-md w-full">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="font-black text-xl uppercase">Gemini API Key Required</h3>
+                  {apiKey && (
+                    <button onClick={() => setIsConfiguringKey(false)} className="font-mono font-bold text-lg">✕</button>
+                  )}
+                </div>
+                <p className="text-sm font-bold mb-4">
+                  Enter your Google Gemini API key. It will be stored exclusively in your local machine and will invoke <b>Gemini 2.5 Flash</b>.
+                </p>
+                <input
+                  type="password"
+                  placeholder="AIzaSy..."
+                  defaultValue={apiKey}
+                  id="key-input-field"
+                  className="w-full border-3 border-brutalDark p-3 font-mono font-bold text-sm shadow-brutal-sm mb-4 outline-none focus:bg-yellow-100"
+                />
+                <button
+                  onClick={() => {
+                    const val = document.getElementById("key-input-field").value.trim();
+                    if (val) saveApiKey(val);
+                  }}
+                  className="tactile-btn w-full bg-brutalGreen text-brutalDark font-black py-3 border-3 border-brutalDark shadow-brutal uppercase text-sm"
+                >
+                  SAVE KEY & INITIALIZE AGENTS
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Navigation Tabs */}
+          <nav className="bg-brutalCream border-b-4 border-brutalDark px-6 py-3">
+            <div className="max-w-7xl mx-auto flex flex-wrap gap-2 md:gap-3">
+              {[
+                { id: "generator", label: "💡 AI ARCHITECT", color: "bg-brutalPink" },
+                { id: "overview", label: "📋 EVENT MASTER", color: "bg-brutalYellow" },
+                { id: "budget", label: "💰 BUDGET VAULT", color: "bg-brutalGreen" },
+                { id: "timeline", label: "⏱️ RUN-SHEET", color: "bg-brutalCyan" },
+                { id: "vendors", label: "🤝 VENDOR SPECS", color: "bg-brutalPurple" },
+                { id: "copilot", label: "🤖 AI COPILOT DOCK", color: "bg-brutalOrange" },
+                { id: "disk", label: "💾 RAW DISK VIEW", color: "bg-white" },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`tactile-btn px-4 py-2 font-black text-xs md:text-sm uppercase border-3 border-brutalDark transition-all ${
+                    activeTab === tab.id
+                      ? `${tab.color} shadow-brutal translate-x-[-1px] translate-y-[-1px]`
+                      : 'bg-white shadow-brutal-sm hover:bg-yellow-50'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          {/* Main Workspace */}
+          <main className="max-w-7xl mx-auto w-full p-4 md:p-6 flex-1">
+
+            {/* TAB 1: AI ARCHITECT (DYNAMIC GENERATOR) */}
+            {activeTab === "generator" && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                <div className="lg:col-span-5 bg-brutalYellow border-4 border-brutalDark shadow-brutal-lg p-6">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="text-2xl">⚡</span>
+                    <h2 className="text-2xl font-black uppercase tracking-tight">AI Event Architect</h2>
+                  </div>
+                  <p className="font-bold text-xs mb-6 text-gray-800">
+                    No template mocks. Gemini 2.5 Flash calculates the complete event footprint, line-item budgets, run-sheets, and vendor guidelines dynamically.
+                  </p>
+
+                  <div className="space-y-4 font-bold text-xs uppercase">
+                    <div>
+                      <label className="block mb-1">Event Category</label>
+                      <select
+                        value={eventType}
+                        onChange={(e) => setEventType(e.target.value)}
+                        className="w-full border-3 border-brutalDark p-2.5 bg-white shadow-brutal-sm text-sm font-bold outline-none"
+                      >
+                        <option value="wedding">💍 The Royal Wedding</option>
+                        <option value="birthday">🎂 Retro Mega Birthday</option>
+                        <option value="community">🎪 Block Party / Fest</option>
+                        <option value="corporate">🚀 Creative Product Launch</option>
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block mb-1">Budget Cap ($)</label>
+                        <input
+                          type="number"
+                          value={targetBudget}
+                          onChange={(e) => setTargetBudget(Number(e.target.value))}
+                          className="w-full border-3 border-brutalDark p-2.5 bg-white shadow-brutal-sm text-sm font-bold outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block mb-1">Guest Headcount</label>
+                        <input
+                          type="number"
+                          value={guestCount}
+                          onChange={(e) => setGuestCount(Number(e.target.value))}
+                          className="w-full border-3 border-brutalDark p-2.5 bg-white shadow-brutal-sm text-sm font-bold outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block mb-1">Vision, Vibe & Aesthetic Goals</label>
+                      <textarea
+                        rows="4"
+                        value={userVision}
+                        onChange={(e) => setUserVision(e.target.value)}
+                        placeholder="e.g. 90s cyberpunk rave wedding with neon lighting, vinyl DJ sets, vegan ramen station, and low-waste decor in a warehouse..."
+                        className="w-full border-3 border-brutalDark p-3 bg-white shadow-brutal-sm text-sm font-medium outline-none"
+                      />
+                    </div>
+
+                    <button
+                      disabled={isGenerating}
+                      onClick={runArchitectAgent}
+                      className="tactile-btn w-full bg-brutalPink text-white font-black py-4 border-3 border-brutalDark shadow-brutal uppercase text-sm flex items-center justify-center gap-2 mt-2"
+                    >
+                      {isGenerating ? (
+                        <>
+                          <span className="animate-spin text-lg">⏳</span>
+                          <span>SYNTHESIZING WITH GEMINI 2.5...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>🔥</span>
+                          <span>SYNTHESIZE COMPLETE BLUEPRINT</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-7 bg-white border-4 border-brutalDark shadow-brutal-lg p-6 flex flex-col justify-between">
+                  <div>
+                    <div className="flex justify-between items-center border-b-3 border-brutalDark pb-3 mb-4">
+                      <h3 className="font-black text-lg uppercase tracking-tight">Active Plan Blueprint</h3>
+                      <span className="font-mono text-xs font-bold bg-brutalGreen border-2 border-brutalDark px-2 py-0.5 shadow-brutal-sm">
+                        {eventData ? eventData.eventTitle : "EMPTY - NOT GENERATED YET"}
+                      </span>
+                    </div>
+
+                    {eventData ? (
+                      <div className="space-y-4">
+                        <div className="bg-brutalCream p-4 border-3 border-brutalDark shadow-brutal-sm">
+                          <h4 className="font-black text-lg text-brutalDark uppercase">{eventData.eventTitle}</h4>
+                          <p className="font-bold text-xs text-brutalPink uppercase tracking-wider">{eventData.tagline}</p>
+                          <p className="text-xs font-medium mt-2 leading-relaxed">{eventData.concepts?.themeSummary}</p>
+                        </div>
+
+                        <div>
+                          <span className="font-mono font-bold text-xs uppercase block mb-1.5">Color Palette Directive</span>
+                          <div className="flex gap-2">
+                            {eventData.concepts?.colorPalette?.map((color, i) => (
+                              <div
+                                key={i}
+                                className="border-2 border-brutalDark px-3 py-1 font-mono text-xs font-bold shadow-brutal-sm"
+                                style={{ backgroundColor: color }}
+                              >
+                                {color}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <span className="font-mono font-bold text-xs uppercase block mb-1.5">Signature Event Hacks</span>
+                          <div className="space-y-2">
+                            {eventData.concepts?.signatureHacks?.map((hack, i) => (
+                              <div key={i} className="bg-yellow-50 border-2 border-brutalDark p-2 font-bold text-xs flex gap-2">
+                                <span className="text-brutalDark font-black">⚡</span>
+                                <span>{hack}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="h-64 flex flex-col items-center justify-center text-center p-6 border-3 border-dashed border-brutalDark">
+                        <span className="text-4xl mb-2">💡</span>
+                        <p className="font-black text-sm uppercase">No Hardcoded Mock Data Allowed</p>
+                        <p className="text-xs font-bold text-gray-600 max-w-sm mt-1">
+                          Click "Synthesize Complete Blueprint" to have Gemini create your entire event infrastructure from scratch and save it straight to your disk.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {eventData && (
+                    <button
+                      onClick={() => setActiveTab("budget")}
+                      className="tactile-btn mt-6 w-full bg-brutalGreen font-black py-3 border-3 border-brutalDark shadow-brutal uppercase text-sm"
+                    >
+                      EXPLORE BUDGET & RUN-SHEET →
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: OVERVIEW */}
+            {activeTab === "overview" && eventData && (
+              <div className="space-y-6">
+                <div className="bg-brutalYellow border-4 border-brutalDark shadow-brutal-lg p-6">
+                  <span className="bg-brutalDark text-brutalYellow font-mono text-xs px-2 py-0.5 font-bold uppercase">
+                    {eventData.eventType} PLAN OVERVIEW
+                  </span>
+                  <h2 className="text-3xl md:text-4xl font-black uppercase mt-2">{eventData.eventTitle}</h2>
+                  <p className="text-base font-bold text-brutalPink uppercase tracking-wide">{eventData.tagline}</p>
+                  <p className="font-medium text-sm mt-3 max-w-4xl leading-relaxed">{eventData.concepts?.themeSummary}</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="bg-white border-4 border-brutalDark shadow-brutal p-5">
+                    <span className="text-xs font-mono font-bold uppercase text-gray-600">Total Budget Cap</span>
+                    <h3 className="text-3xl font-black font-mono mt-1">${eventData.totalBudgetCap?.toLocaleString()}</h3>
+                    <p className="text-xs font-bold mt-2 text-brutalGreen bg-brutalDark p-1 inline-block">100% Calculated by Gemini</p>
+                  </div>
+                  <div className="bg-white border-4 border-brutalDark shadow-brutal p-5">
+                    <span className="text-xs font-mono font-bold uppercase text-gray-600">Timeline Milestones</span>
+                    <h3 className="text-3xl font-black font-mono mt-1">{eventData.timeline?.length || 0} Phases</h3>
+                    <p className="text-xs font-bold mt-2">Day-of coordinated run-sheet</p>
+                  </div>
+                  <div className="bg-white border-4 border-brutalDark shadow-brutal p-5">
+                    <span className="text-xs font-mono font-bold uppercase text-gray-600">Vendors Needed</span>
+                    <h3 className="text-3xl font-black font-mono mt-1">{eventData.vendors?.length || 0} Partners</h3>
+                    <p className="text-xs font-bold mt-2">Vetted contracts & criteria</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: DYNAMIC BUDGET VAULT */}
+            {activeTab === "budget" && eventData && (
+              <div className="space-y-6">
+                <div className="bg-brutalPurple text-white border-4 border-brutalDark shadow-brutal-lg p-6 flex flex-wrap justify-between items-center gap-4">
+                  <div>
+                    <h2 className="text-2xl font-black uppercase">Dynamic Budget Vault</h2>
+                    <p className="font-bold text-xs text-yellow-200">
+                      Synchronized live to your local hard drive file.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const name = prompt("Item name:");
+                      const cost = Number(prompt("Estimated Cost:"));
+                      if (name && cost) {
+                        const updated = {
+                          ...eventData,
+                          budgetItems: [
+                            ...eventData.budgetItems,
+                            { id: Date.now(), category: "Custom", name, estimated: cost, actual: 0, priority: "Medium" }
+                          ]
+                        };
+                        updateAndSyncEvent(updated);
+                      }
+                    }}
+                    className="tactile-btn bg-brutalYellow text-brutalDark font-black px-4 py-2 border-3 border-brutalDark shadow-brutal text-xs uppercase"
+                  >
+                    + ADD MANUAL EXPENSE
+                  </button>
+                </div>
+
+                <div className="bg-white border-4 border-brutalDark shadow-brutal-lg overflow-x-auto">
+                  <table className="w-full text-left border-collapse font-sans text-sm">
+                    <thead>
+                      <tr className="border-b-4 border-brutalDark bg-brutalCream font-mono text-xs uppercase font-black">
+                        <th className="p-3">Category</th>
+                        <th className="p-3">Deliverable Item</th>
+                        <th className="p-3">Priority</th>
+                        <th className="p-3">Estimated ($)</th>
+                        <th className="p-3">Actual Spent ($)</th>
+                        <th className="p-3 text-center">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {eventData.budgetItems?.map((item) => (
+                        <tr key={item.id} className="border-b-2 border-brutalDark font-bold hover:bg-yellow-50">
+                          <td className="p-3 font-mono text-xs">
+                            <span className="bg-brutalCyan border-2 border-brutalDark px-2 py-0.5 shadow-brutal-sm">
+                              {item.category}
+                            </span>
+                          </td>
+                          <td className="p-3">{item.name}</td>
+                          <td className="p-3 font-mono text-xs">
+                            <span className={`px-2 py-0.5 border-2 border-brutalDark shadow-brutal-sm ${
+                              item.priority === 'High' ? 'bg-brutalPink text-white' : 'bg-brutalYellow'
+                            }`}>
+                              {item.priority}
+                            </span>
+                          </td>
+                          <td className="p-3 font-mono font-black">${item.estimated?.toLocaleString()}</td>
+                          <td className="p-3 font-mono">
+                            <input
+                              type="number"
+                              value={item.actual || 0}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                const updatedItems = eventData.budgetItems.map(b => b.id === item.id ? { ...b, actual: val } : b);
+                                updateAndSyncEvent({ ...eventData, budgetItems: updatedItems });
+                              }}
+                              className="w-24 border-2 border-brutalDark px-2 py-1 font-mono font-bold text-xs"
+                            />
+                          </td>
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => {
+                                const updatedItems = eventData.budgetItems.filter(b => b.id !== item.id);
+                                updateAndSyncEvent({ ...eventData, budgetItems: updatedItems });
+                              }}
+                              className="tactile-btn bg-brutalPink text-white font-mono text-xs px-2.5 py-1 border-2 border-brutalDark shadow-brutal-sm"
+                            >
+                              DEL
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: DAY-OF TIMELINE / RUN-SHEET */}
+            {activeTab === "timeline" && eventData && (
+              <div className="space-y-6">
+                <div className="bg-brutalCyan border-4 border-brutalDark shadow-brutal-lg p-6 flex justify-between items-center">
+                  <div>
+                    <h2 className="text-2xl font-black uppercase">Run-Sheet Milestones</h2>
+                    <p className="font-bold text-xs">Precision scheduling generated dynamically by the AI agent.</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const time = prompt("Milestone Time (e.g. 16:30):");
+                      const task = prompt("Task Description:");
+                      const owner = prompt("Responsible Lead:");
+                      if (time && task) {
+                        const updated = {
+                          ...eventData,
+                          timeline: [
+                            ...eventData.timeline,
+                            { id: Date.now(), time, task, owner: owner || "Lead", completed: false }
+                          ]
+                        };
+                        updateAndSyncEvent(updated);
+                      }
+                    }}
+                    className="tactile-btn bg-white font-black px-4 py-2 border-3 border-brutalDark shadow-brutal text-xs uppercase"
+                  >
+                    + ADD TIME BLOCK
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  {eventData.timeline?.map((task) => (
+                    <div
+                      key={task.id}
+                      className={`border-4 border-brutalDark p-4 shadow-brutal flex items-center justify-between transition-all ${
+                        task.completed ? 'bg-brutalGreen/30' : 'bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center gap-4">
+                        <input
+                          type="checkbox"
+                          checked={task.completed || false}
+                          onChange={() => {
+                            const updated = eventData.timeline.map(t => t.id === task.id ? { ...t, completed: !t.completed } : t);
+                            updateAndSyncEvent({ ...eventData, timeline: updated });
+                            if (!task.completed) triggerConfetti();
+                          }}
+                          className="w-6 h-6 border-3 border-brutalDark cursor-pointer accent-black"
+                        />
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-black text-xs bg-brutalDark text-white px-2 py-0.5">
+                              {task.time}
+                            </span>
+                            <span className="font-mono text-xs font-bold text-gray-600 uppercase">
+                              PIC: <b>{task.owner}</b>
+                            </span>
+                          </div>
+                          <p className={`font-black text-base mt-1 ${task.completed ? 'line-through text-gray-500' : ''}`}>
+                            {task.task}
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          const updated = eventData.timeline.filter(t => t.id !== task.id);
+                          updateAndSyncEvent({ ...eventData, timeline: updated });
+                        }}
+                        className="tactile-btn bg-brutalPink text-white font-mono text-xs px-3 py-1.5 border-2 border-brutalDark shadow-brutal-sm"
+                      >
+                        REMOVE
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5: VENDOR CHECKLIST */}
+            {activeTab === "vendors" && eventData && (
+              <div className="space-y-6">
+                <div className="bg-brutalGreen border-4 border-brutalDark shadow-brutal-lg p-6 flex justify-between items-center">
+                  <div>
+                    <h2 className="text-2xl font-black uppercase">Vendor Specifications</h2>
+                    <p className="font-bold text-xs">Vetting guidelines and estimated quotes generated for your event.</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {eventData.vendors?.map((vendor) => (
+                    <div key={vendor.id} className="bg-white border-4 border-brutalDark shadow-brutal p-5 flex flex-col justify-between">
+                      <div>
+                        <div className="flex justify-between items-start mb-2">
+                          <span className="bg-brutalCyan border-2 border-brutalDark font-mono text-xs font-black px-2 py-0.5">
+                            {vendor.role}
+                          </span>
+                          <span className={`border-2 border-brutalDark font-mono text-xs font-black px-2 py-0.5 ${
+                            vendor.status === 'Contracted' ? 'bg-brutalGreen' : 'bg-brutalYellow'
+                          }`}>
+                            {vendor.status}
+                          </span>
+                        </div>
+                        <h4 className="font-black text-lg">{vendor.name}</h4>
+                        <p className="font-mono font-bold text-sm text-gray-700 mt-1">Est. Fee: ${vendor.fee?.toLocaleString()}</p>
+                        <div className="mt-3 bg-yellow-50 border-2 border-brutalDark p-2.5">
+                          <span className="font-mono font-bold text-xs block text-gray-500 uppercase">Vetting Criteria:</span>
+                          <p className="text-xs font-semibold mt-1">{vendor.vettingCriteria}</p>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          const newStatus = vendor.status === 'Contracted' ? 'To Contact' : 'Contracted';
+                          const updated = eventData.vendors.map(v => v.id === vendor.id ? { ...v, status: newStatus } : v);
+                          updateAndSyncEvent({ ...eventData, vendors: updated });
+                          if (newStatus === 'Contracted') triggerConfetti();
+                        }}
+                        className={`tactile-btn mt-4 w-full py-2 font-mono text-xs font-black border-2 border-brutalDark shadow-brutal-sm uppercase ${
+                          vendor.status === 'Contracted' ? 'bg-brutalDark text-white' : 'bg-brutalGreen text-brutalDark'
+                        }`}
+                      >
+                        {vendor.status === 'Contracted' ? 'MARK PENDING' : 'MARK CONTRACTED'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 6: AI COPILOT DOCK (DYNAMIC REAL-TIME MUTATOR) */}
+            {activeTab === "copilot" && (
+              <div className="bg-white border-4 border-brutalDark shadow-brutal-lg p-6 max-w-4xl mx-auto">
+                <div className="flex items-center gap-2 border-b-3 border-brutalDark pb-4 mb-4">
+                  <span className="text-3xl">🤖</span>
+                  <div>
+                    <h2 className="text-2xl font-black uppercase tracking-tight">Dynamic Event Copilot Agent</h2>
+                    <p className="font-bold text-xs text-gray-600">
+                      Instruct the agent to mutate your event in natural language. (e.g. "Cut catering budget by 20%", "Add a fireworks milestone at 22:00")
+                    </p>
+                  </div>
+                </div>
+
+                {/* Conversation Box */}
+                <div className="bg-brutalCream border-3 border-brutalDark p-4 h-80 overflow-y-auto mb-4 space-y-3 custom-scroll">
+                  {copilotMessages.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center text-gray-500 font-mono text-xs">
+                      <span>🤖 COPILOT AGENT ARMED</span>
+                      <p className="mt-1 font-bold">Try typing: "Add 3 quirky birthday games into the schedule" or "Trim $1,500 from the budget"</p>
+                    </div>
+                  ) : (
+                    copilotMessages.map((msg, index) => (
+                      <div
+                        key={index}
+                        className={`p-3 border-2 border-brutalDark shadow-brutal-sm font-bold text-xs ${
+                          msg.sender === 'user' ? 'bg-white ml-12' : 'bg-brutalYellow mr-12'
+                        }`}
+                      >
+                        <span className="font-mono text-xs block mb-1 uppercase font-black">
+                          {msg.sender === 'user' ? '👤 YOU' : '⚡ GEMINI COPILOT'}
+                        </span>
+                        <p>{msg.text}</p>
+                      </div>
+                    ))
+                  )}
+                  {isCopilotThinking && (
+                    <div className="bg-brutalYellow p-3 border-2 border-brutalDark shadow-brutal-sm font-bold text-xs animate-pulse">
+                      ⚡ AGENT RESTRUCTURING EVENT MODEL & FLUSHING TO DISK...
+                    </div>
+                  )}
+                </div>
+
+                {/* Prompt Input Form */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    runCopilotAgent();
+                  }}
+                  className="flex gap-2"
+                >
+                  <input
+                    type="text"
+                    value={copilotInput}
+                    onChange={(e) => setCopilotInput(e.target.value)}
+                    placeholder="Tell the AI Agent what to change in the event..."
+                    className="flex-1 border-3 border-brutalDark p-3 font-bold text-sm shadow-brutal-sm outline-none focus:bg-yellow-50"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isCopilotThinking}
+                    className="tactile-btn bg-brutalDark text-brutalYellow font-black px-6 py-3 border-3 border-brutalDark shadow-brutal uppercase text-sm"
+                  >
+                    MUTATE
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* TAB 7: RAW DISK VAULT INSPECTOR */}
+            {activeTab === "disk" && (
+              <div className="bg-white border-4 border-brutalDark shadow-brutal-lg p-6">
+                <div className="flex flex-wrap justify-between items-center gap-4 border-b-3 border-brutalDark pb-4 mb-4">
+                  <div>
+                    <h2 className="text-2xl font-black uppercase flex items-center gap-2">
+                      <span>💾</span>
+                      <span>LOCAL COMPUTER DISK INSPECTOR</span>
+                    </h2>
+                    <p className="font-bold text-xs text-gray-700">
+                      Direct view of <b>event_vault_db.json</b> located inside your selected physical drive directory.
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => flushToDisk(eventData)}
+                      className="tactile-btn bg-brutalGreen font-black px-4 py-2 border-2 border-brutalDark shadow-brutal-sm text-xs uppercase"
+                    >
+                      FORCE DISK FLUSH
+                    </button>
+                    <button
+                      onClick={() => {
+                        const blob = new Blob([JSON.stringify(eventData, null, 2)], { type: "application/json" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `event_vault_backup_${Date.now()}.json`;
+                        a.click();
+                      }}
+                      className="tactile-btn bg-brutalYellow font-black px-4 py-2 border-2 border-brutalDark shadow-brutal-sm text-xs uppercase"
+                    >
+                      DOWNLOAD .JSON
+                    </button>
+                  </div>
+                </div>
+
+                <pre className="bg-brutalDark text-brutalGreen p-4 border-3 border-brutalDark font-mono text-xs overflow-auto max-h-[500px] shadow-brutal custom-scroll leading-relaxed">
+                  {eventData ? JSON.stringify(eventData, null, 2) : "// No event data currently loaded in local drive."}
+                </pre>
+              </div>
+            )}
+
+          </main>
+
+          {/* Tactile Footer */}
+          <footer className="border-t-4 border-brutalDark bg-white p-4 font-mono text-xs font-bold flex flex-wrap justify-between items-center gap-2">
+            <div>
+              STORAGE STATUS: <span className="bg-brutalYellow px-2 py-0.5 border border-black">{diskStatus}</span>
+            </div>
+            <div>
+              POWERED BY <b>@google/genai</b> (GEMINI 2.5 FLASH)
+            </div>
+          </footer>
+        </div>
+      );
+    }
+
+    // Render the React App
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<NeoPlannerApp />);
+  </script>
+</body>
+</html>
